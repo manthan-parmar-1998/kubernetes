@@ -585,7 +585,10 @@ func (p *PriorityQueue) runPreEnqueuePlugin(ctx context.Context, logger klog.Log
 		return s
 	}
 	pInfo.UnschedulablePlugins.Insert(pl.Name())
-	metrics.UnschedulableReason(pl.Name(), pod.Spec.SchedulerName).Inc()
+	// NOTE: We do not increment the unschedulable metric here because the pod is not yet unschedulable.
+	// The pod is only gated and will be moved to unschedulable queue later if it remains unschedulable.
+	// The metric will be incremented when the pod is actually moved to unschedulable state in 
+	// addUnschedulableWithoutQueueingHint or AddUnschedulableIfNotPresent to avoid double counting.
 	pInfo.GatingPlugin = pl.Name()
 	pInfo.GatingPluginEvents = p.pluginToEventsMap[pInfo.GatingPlugin]
 	if s.Code() == fwk.Error {
@@ -622,6 +625,13 @@ func (p *PriorityQueue) moveToActiveQ(logger klog.Logger, pInfo *framework.Queue
 			if p.unschedulablePods.get(pInfo.Pod) != nil {
 				return
 			}
+			
+			// Increment the unschedulable metric for all plugins that caused the pod to be gated
+			// This ensures that pods gated by PreEnqueue plugins are properly counted in the metric
+			for plugin := range pInfo.UnschedulablePlugins {
+				metrics.UnschedulableReason(plugin, pInfo.Pod.Spec.SchedulerName).Inc()
+			}
+			
 			p.unschedulablePods.addOrUpdate(pInfo, event)
 			logger.V(5).Info("Pod moved to an internal scheduling queue, because the pod is gated", "pod", klog.KObj(pInfo.Pod), "event", event, "queue", unschedulableQ)
 			return
@@ -796,6 +806,9 @@ func (p *PriorityQueue) addUnschedulableWithoutQueueingHint(logger klog.Logger, 
 
 	// If a move request has been received, move it to the BackoffQ, otherwise move
 	// it to unschedulablePods.
+	// NOTE: This is the authoritative place where the unschedulable_pods metric is incremented.
+	// It represents pods that are actually being moved to unschedulable state, ensuring each
+	// unschedulable pod is counted exactly once per plugin that rejected it.
 	for plugin := range rejectorPlugins {
 		metrics.UnschedulableReason(plugin, pInfo.Pod.Spec.SchedulerName).Inc()
 	}
@@ -864,6 +877,9 @@ func (p *PriorityQueue) AddUnschedulableIfNotPresent(logger klog.Logger, pInfo *
 
 	// If a move request has been received, move it to the BackoffQ, otherwise move
 	// it to unschedulablePods.
+	// NOTE: This is the authoritative place where the unschedulable_pods metric is incremented.
+	// It represents pods that are actually being moved to unschedulable state, ensuring each
+	// unschedulable pod is counted exactly once per plugin that rejected it.
 	rejectorPlugins := pInfo.UnschedulablePlugins.Union(pInfo.PendingPlugins)
 	for plugin := range rejectorPlugins {
 		metrics.UnschedulableReason(plugin, pInfo.Pod.Spec.SchedulerName).Inc()
