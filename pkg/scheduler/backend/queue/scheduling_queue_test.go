@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/component-base/metrics/testutil"
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/ktesting"
@@ -1542,6 +1543,200 @@ func (pl *preEnqueuePlugin) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Stat
 		}
 	}
 	return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "pod name not in allowlists")
+}
+
+// Test to demonstrate the double counting issue with unschedulable pods metric
+func TestUnschedulableMetricDoubleCountingBug(t *testing.T) {
+	ctx := context.Background()
+	logger := klog.FromContext(ctx)
+	
+	// Create a pod that will pass PreEnqueue initially
+	pod := st.MakePod().Name("test-pod").Label("bar", "").Obj()
+	
+	// Create a plugin that will succeed for this pod
+	plugin := &preEnqueuePlugin{allowlists: []string{"bar"}} // pod has "bar" label
+	
+	// Set up plugin map
+	pluginMap := map[string]map[string]framework.PreEnqueuePlugin{
+		"": {plugin.Name(): plugin},
+	}
+	
+	// Create queue with the plugin
+	q := NewTestQueue(ctx, newDefaultQueueSort(), WithPreEnqueuePluginMap(pluginMap))
+	
+	// Clear metrics to start fresh
+	legacyregistry.Reset()
+	metrics.Register()
+	
+	// 1. Add pod to queue (this will pass PreEnqueue and go to active queue)
+	q.Add(logger, pod)
+	
+	// 2. Pop the pod (simulating the scheduler picking it up)
+	pInfo, err := q.Pop(logger)
+	if err != nil {
+		t.Fatalf("Failed to pop pod: %v", err)
+	}
+	
+	// Verify this is our pod
+	if pInfo.Pod.Name != "test-pod" {
+		t.Fatalf("Got wrong pod: %s", pInfo.Pod.Name)
+	}
+	
+	// 3. Simulate a scheduling failure by manually adding the plugin to UnschedulablePlugins
+	// (this simulates what would happen if the plugin failed during the actual scheduling phase)
+	pInfo.UnschedulablePlugins.Insert(plugin.Name())
+	
+	// 4. Now simulate scheduler failure and calling AddUnschedulableIfNotPresent
+	// (this is what happens in handleSchedulingFailure in schedule_one.go)
+	// This should increment the metric for the plugin
+	err = q.AddUnschedulableIfNotPresent(logger, pInfo, q.SchedulingCycle())
+	if err != nil {
+		t.Fatalf("Failed to add unschedulable pod: %v", err)
+	}
+	
+	// 5. Now let's simulate the double counting scenario by calling AddUnschedulableIfNotPresent again
+	// (this could happen in edge cases or concurrent scenarios)
+	err = q.AddUnschedulableIfNotPresent(logger, pInfo, q.SchedulingCycle())
+	if err != nil && !strings.Contains(err.Error(), "already present") {
+		t.Fatalf("Unexpected error from second AddUnschedulableIfNotPresent: %v", err)
+	}
+	
+	// Check final metric value
+	gatherer := metrics.GetGather()
+	metricFamilies, err := gatherer.Gather()
+	if err != nil {
+		t.Fatalf("Failed to gather metrics: %v", err)
+	}
+	
+	t.Logf("=== All gathered metrics ===")
+	var metricValue float64
+	for _, mf := range metricFamilies {
+		if strings.Contains(mf.GetName(), "unschedulable_pods") {
+			t.Logf("Metric: %s", mf.GetName())
+			for _, metric := range mf.GetMetric() {
+				labels := metric.GetLabel()
+				pluginName := ""
+				for _, label := range labels {
+					if label.GetName() == "plugin" {
+						pluginName = label.GetValue()
+					}
+				}
+				if pluginName == plugin.Name() {
+					t.Logf("  Plugin: %s", pluginName)
+					if metric.GetGauge() != nil {
+						metricValue = metric.GetGauge().GetValue()
+						t.Logf("  Value: %f", metricValue)
+					}
+				}
+			}
+		}
+	}
+	
+	// The metric should only show a value of 1, but with double counting it might show more
+	if metricValue > 1.0 {
+		t.Logf("POTENTIAL DOUBLE COUNTING DETECTED: Metric value is %f, expected 1.0", metricValue)
+		t.Logf("This could indicate the metric is being incremented multiple times for the same plugin failure")
+	} else if metricValue == 1.0 {
+		t.Logf("Metric value is correct: %f", metricValue)
+	} else {
+		t.Logf("Metric value is %f", metricValue)
+	}
+}
+
+// This test demonstrates the actual double counting bug more directly
+func TestUnschedulableMetricDoubleCountingActualBug(t *testing.T) {
+	ctx := context.Background()
+	logger := klog.FromContext(ctx)
+	
+	// Create a pod that will fail PreEnqueue
+	pod := st.MakePod().Name("test-pod").Label("foo", "").Obj()
+	
+	// Create a plugin that will fail for this pod
+	plugin := &preEnqueuePlugin{allowlists: []string{"bar"}} // pod has "foo" label, not "bar"
+	
+	// Set up plugin map
+	pluginMap := map[string]map[string]framework.PreEnqueuePlugin{
+		"": {plugin.Name(): plugin},
+	}
+	
+	// Create queue with the plugin
+	q := NewTestQueue(ctx, newDefaultQueueSort(), WithPreEnqueuePluginMap(pluginMap))
+	
+	// Clear metrics to start fresh
+	legacyregistry.Reset()
+	metrics.Register()
+	
+	// Create QueuedPodInfo manually to test the double counting scenario
+	pInfo, err := framework.NewPodInfo(pod)
+	if err != nil {
+		t.Fatalf("Failed to create PodInfo: %v", err)
+	}
+	queuedPodInfo := &framework.QueuedPodInfo{
+		PodInfo:              pInfo,
+		UnschedulablePlugins: sets.New[string](),
+	}
+	
+	// Simulate what happens in runPreEnqueuePlugin
+	// 1. Call the plugin directly (simulating the PreEnqueue call)
+	status := plugin.PreEnqueue(ctx, pod)
+	if status.IsSuccess() {
+		t.Fatalf("Expected plugin to fail, but it succeeded")
+	}
+	
+	// 2. Manually do what runPreEnqueuePlugin does:
+	//    - Add plugin to UnschedulablePlugins 
+	//    - Increment the metric (this is the FIRST increment)
+	queuedPodInfo.UnschedulablePlugins.Insert(plugin.Name())
+	metrics.UnschedulableReason(plugin.Name(), pod.Spec.SchedulerName).Inc()
+	
+	t.Logf("After first increment (simulating runPreEnqueuePlugin)")
+	metricValue1 := getMetricValue(t, plugin.Name())
+	t.Logf("Metric value: %f", metricValue1)
+	
+	// 3. Now call AddUnschedulableIfNotPresent which should increment the metric AGAIN
+	//    This is what happens in the real scheduler when it processes the pod failure
+	err = q.AddUnschedulableIfNotPresent(logger, queuedPodInfo, 1)
+	if err != nil {
+		t.Fatalf("Failed to add unschedulable pod: %v", err)
+	}
+	
+	t.Logf("After AddUnschedulableIfNotPresent")
+	metricValue2 := getMetricValue(t, plugin.Name())
+	t.Logf("Metric value: %f", metricValue2)
+	
+	// This should demonstrate the double counting bug
+	if metricValue2 > metricValue1 {
+		t.Logf("DOUBLE COUNTING DETECTED!")
+		t.Logf("Metric went from %f to %f", metricValue1, metricValue2)
+		t.Logf("The same plugin failure was counted %f times instead of once", metricValue2)
+	} else {
+		t.Logf("No double counting detected - metric stayed at %f", metricValue2)
+	}
+}
+
+// Helper function to get metric value for a specific plugin
+func getMetricValue(t *testing.T, pluginName string) float64 {
+	gatherer := metrics.GetGather()
+	metricFamilies, err := gatherer.Gather()
+	if err != nil {
+		t.Fatalf("Failed to gather metrics: %v", err)
+	}
+	
+	for _, mf := range metricFamilies {
+		if strings.Contains(mf.GetName(), "unschedulable_pods") {
+			for _, metric := range mf.GetMetric() {
+				labels := metric.GetLabel()
+				for _, label := range labels {
+					if label.GetName() == "plugin" && label.GetValue() == pluginName {
+						if metric.GetGauge() != nil {
+							return metric.GetGauge().GetValue()
+						}
+					}
+				}
+			}
+		}
+	}
+	return 0.0
 }
 
 func TestPriorityQueue_moveToActiveQ(t *testing.T) {
