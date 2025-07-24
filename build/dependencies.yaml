@@ -80,7 +80,7 @@ dependencies:
       match: configs\[Etcd\] = Config{list\.GcEtcdRegistry, "etcd", "\d+\.\d+.\d+(-(alpha|beta|rc).\d+)?(-\d+)?"}
 
   - name: "etcd-image"
-    version: 3.6.2
+    version: 3.6.3
     refPaths:
     - path: cluster/images/etcd/Makefile
       match: BUNDLED_ETCD_VERSIONS\?|LATEST_ETCD_VERSION\?
@@ -168,8 +168,6 @@ dependencies:
       match: registry\.k8s\.io\/build-image\/debian-base-amd64:[a-zA-Z]+\-v((([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)
     - path: test/images/regression-issue-74839/BASEIMAGE
       match: registry\.k8s\.io\/build-image\/debian-base-amd64:[a-zA-Z]+\-v((([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)
-    - path: test/images/pets/redis-installer/BASEIMAGE
-      match: registry\.k8s\.io\/build-image\/debian-base-amd64:[a-zA-Z]+\-v((([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)
     - path: cluster/gce/gci/configure-helper.sh
       match: registry\.k8s\.io\/build-image\/debian-base:[a-zA-Z]+\-v((([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)
     - path: pkg/volume/plugins.go
@@ -206,8 +204,6 @@ dependencies:
       match: registry.k8s.io\/pause:\d+\.\d+
     - path: cmd/kubeadm/app/constants/constants.go
       match: PauseVersion\s+=
-    - path: cmd/kubelet/app/options/container_runtime.go
-      match: defaultPodSandboxImageVersion\s+=
     - path: hack/testdata/pod-with-precision.json
       match: registry.k8s.io\/pause:\d+\.\d+
     - path: staging/src/k8s.io/kubectl/testdata/set/multi-resource-yaml.yaml

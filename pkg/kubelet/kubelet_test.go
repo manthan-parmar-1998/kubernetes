@@ -89,6 +89,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/pluginmanager"
 	kubepod "k8s.io/kubernetes/pkg/kubelet/pod"
 	podtest "k8s.io/kubernetes/pkg/kubelet/pod/testing"
+	"k8s.io/kubernetes/pkg/kubelet/podcertificate"
 	proberesults "k8s.io/kubernetes/pkg/kubelet/prober/results"
 	probetest "k8s.io/kubernetes/pkg/kubelet/prober/testing"
 	"k8s.io/kubernetes/pkg/kubelet/secret"
@@ -298,6 +299,7 @@ func newTestKubeletWithImageList(
 	podStartupLatencyTracker := kubeletutil.NewPodStartupLatencyTracker()
 	kubelet.statusManager = status.NewManager(fakeKubeClient, kubelet.podManager, &statustest.FakePodDeletionSafetyProvider{}, podStartupLatencyTracker)
 	kubelet.nodeStartupLatencyTracker = kubeletutil.NewNodeStartupLatencyTracker()
+	kubelet.podCertificateManager = &podcertificate.NoOpManager{}
 
 	kubelet.containerRuntime = fakeRuntime
 	kubelet.runtimeCache = containertest.NewFakeRuntimeCache(kubelet.containerRuntime)
@@ -3116,6 +3118,7 @@ func TestSyncPodSpans(t *testing.T) {
 		kubelet.podLogsDirectory,
 		kubelet.machineInfo,
 		kubelet.podWorkers,
+		kubeCfg.MaxPods,
 		kubelet.os,
 		kubelet,
 		nil,
@@ -3378,6 +3381,15 @@ func TestRecordAdmissionRejection(t *testing.T) {
                 # TYPE kubelet_admission_rejections_total counter
                 kubelet_admission_rejections_total{reason="OutOfExtendedResources"} 1
             `,
+		},
+		{
+			name:   "PodLevelResources",
+			reason: lifecycle.PodLevelResourcesNotAdmittedReason,
+			wants: `
+				# HELP kubelet_admission_rejections_total [ALPHA] Cumulative number pod admission rejections by the Kubelet.
+				# TYPE kubelet_admission_rejections_total counter
+				kubelet_admission_rejections_total{reason="PodLevelResourcesNotSupported"} 1
+			`,
 		},
 		{
 			name:   "OtherReason",
